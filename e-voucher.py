@@ -47,21 +47,61 @@ with col1:
 
     if st.button("Convert E-Voucher"):
         try:
-            order_id = re.search(r'"order_id":"([^"]+)",', raw_data)
-            date = re.search(r'"date":"([^"]+)",', raw_data)
-            pin_code = re.search(r'"pin_code":"([^"]+)"', raw_data)
+            # support multiple JSON/text lines: parse each non-empty line separately
+            lines = [ln for ln in (raw_data or "").splitlines() if ln.strip()]
+            blocks = []
 
-            # create a literal formatted JSON string (commas included)
-            formatted_json = (
-                '{\n'
-                '  "DATE": "' + (date.group(1) if date else '') + '",\n'
-                '  "CODE": "' + (pin_code.group(1) if pin_code else '') + '",\n'
-                '  "ORDER_ID": "' + (order_id.group(1) if order_id else '') + '"\n'
-                '}'
-            )
+            for line in lines:
+                order_id = ''
+                date = ''
+                pin_code = ''
 
-            st.session_state.evoucher_output = formatted_json
-            st.success("✅ E-Voucher Conversion Successful!")
+                # 1) try to parse as JSON (preferred)
+                parsed = None
+                try:
+                    parsed = json.loads(line)
+                except Exception:
+                    parsed = None
+
+                if parsed:
+                    # order_id/date usually inside orderResponse
+                    order_resp = parsed.get("orderResponse") or parsed.get("order_response") or {}
+                    order_id = order_resp.get("order_id") or parsed.get("order_id") or ""
+                    date = order_resp.get("date") or parsed.get("date") or ""
+                    # pin_code usually under vouchers -> first item -> pin_code
+                    vouchers = order_resp.get("vouchers") if isinstance(order_resp, dict) else None
+                    if isinstance(vouchers, list) and vouchers:
+                        pin_code = vouchers[0].get("pin_code") or vouchers[0].get("pin-code") or ""
+                    pin_code = pin_code or parsed.get("pin_code") or parsed.get("pin-code") or ""
+                else:
+                    # 2) fallback to regex extraction from arbitrary text line
+                    m_order = re.search(r'"order[_-]?id"\s*:\s*"([^"]+)"', line)
+                    m_date = re.search(r'"date"\s*:\s*"([^"]+)"', line)
+                    m_pin = re.search(r'"pin[_-]?code"\s*:\s*"([^"]+)"', line) or re.search(r'"pin_code"\s*:\s*"([^"]+)"', line)
+                    if m_order:
+                        order_id = m_order.group(1)
+                    if m_date:
+                        date = m_date.group(1)
+                    if m_pin:
+                        pin_code = m_pin.group(1)
+
+                # Build the literal formatted JSON block (commas/newlines preserved)
+                block = (
+                    '{\n'
+                    '  "DATE": "' + (date or '') + '",\n'
+                    '  "CODE": "' + (pin_code or '') + '",\n'
+                    '  "ORDER_ID": "' + (order_id or '') + '"\n'
+                    '}'
+                )
+                blocks.append(block)
+
+            if not blocks:
+                st.error("No valid lines found to convert.")
+            else:
+                # join multiple blocks with a blank line between them
+                ev_text = "\n\n".join(blocks)
+                st.session_state.evoucher_output = ev_text
+                st.success(f"✅ Converted {len(blocks)} item(s)")
 
         except Exception as e:
             st.error(f"❌ Error parsing data: {e}")
@@ -126,24 +166,27 @@ with col2:
 
     if st.button("Format Phone Number"):
         try:
-            # Remove leading "00" if present
-            formatted_number = phone_number[2:] if phone_number.startswith("00") else phone_number
-
-            # Validate final number: numeric and exactly 13 digits
-            if formatted_number.isdigit() and len(formatted_number) == 13:
-                # create a literal formatted JSON string (commas included)
+            # 1) Trim outer spaces
+            s = (phone_number or "").strip()
+            # 2) Remove all internal whitespace (user might paste with spaces)
+            digits = re.sub(r'\s+', '', s)
+            # 3) Remove optional leading "00"
+            if digits.startswith("00"):
+                digits = digits[2:]
+            # 4) Validate: must be exactly 13 digits
+            if digits.isdigit() and len(digits) == 13:
+                final_number = digits
                 formatted_json = (
                     '{\n'
-                    '  "subscriberId": "' + formatted_number + '",\n'
-                    '  "phone": "' + formatted_number + '",\n'
-                    '  "whatsappNumber": "' + formatted_number + '"\n'
+                    '  "subscriberId": "' + final_number + '",\n'
+                    '  "phone": "' + final_number + '",\n'
+                    '  "whatsappNumber": "' + final_number + '"\n'
                     '}'
                 )
-
                 st.session_state.phone_output = formatted_json
                 st.success("✅ Phone Number Formatting Successful!")
             else:
-                st.error("❌ Phone number must be 13 digits (with or without leading '00').")
+                st.error("❌ Result must be exactly 13 digits after trimming spaces and removing optional leading '00'.")
 
         except Exception as e:
             st.error(f"❌ Error formatting phone number: {e}")
